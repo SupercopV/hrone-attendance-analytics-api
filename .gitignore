@@ -10,3 +10,6 @@ ENV/
 *.log
 .coverage
 htmlcov/
+
+# Problem statement (kept locally, not tracked publicly)
+PROBLEM_STATEMENT.docx
