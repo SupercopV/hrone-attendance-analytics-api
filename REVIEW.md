@@ -1,0 +1,30 @@
+# REVIEW.md
+
+## Starter Code Defects
+
+| # | Where (function / line) | What is wrong | How you'd notice it (test, input, or symptom) | How you fixed it |
+|---|---|---|---|---|
+| 1 | `round_half_up` | Used Python's built-in `round()`, which implements banker's rounding (round-half-to-even). Values like `0.025` rounded down to `0.02` instead of `0.03`. | Testing boundary decimals (`round_half_up(0.025, 2)` produced `0.02`), directly violating Rule R10. | Replaced with `decimal.Decimal` quantization using `decimal.ROUND_HALF_UP`. |
+| 2 | `determine_attendance_date` | Converted epoch timestamps using UTC date (`strftime("%Y-%m-%d")`) and completely lacked handling for overnight shifts (`shift_end <= shift_start`). | Punches between 00:00 UTC and 05:30 UTC resolved to the wrong Indian calendar date. An overnight punch-in at 01:00 IST was assigned to the next day instead of the shift start day (R1). | Converted timestamps to IST timezone (`Asia/Kolkata` / `+05:30`); for overnight shifts with punches before `shift_end`, mapped date to previous calendar day. |
+| 3 | `compute_late_minutes` | Lacked 15-minute grace period check (R2) and failed to handle overnight shift date transitions. | Punching in 10 minutes past shift start returned 10 late minutes instead of 0. Overnight shifts caused negative or incorrect minute differences. | Implemented R2: checked punch against `shift_start + 15 min`. If within grace, returned 0; otherwise computed full difference from `shift_start` across dates. |
+| 4 | `compute_overtime` | Lacked 30-minute minimum threshold check (R3) and failed on overnight shifts crossing midnight. | Punching out 15 minutes after shift end returned 15 overtime minutes instead of 0. | Implemented R3: computed total minutes after `shift_end`; if `< 30`, returned 0; otherwise returned full minutes. |
+| 5 | `compute_work_hours` & `compute_half_day` | Floating-point precision error in work hours, and half-day condition checked `<= 4.0` instead of `< 4.50` (R5). | A shift of 4.25 hours was marked full day instead of half day; work hours contained floating-point inaccuracies like `8.9999999994`. | Calculated `(punch_out - punch_in).total_seconds() / 3600.0`, rounded half-up to 2 decimals (R4), and set `half_day = work_hours < 4.50` (R5). |
+| 6 | Application `lifespan` / Startup | No indexes were created at startup. Seeded database only contains default `_id` index. | Every query resulted in a full collection scan (`COLLSCAN`), and concurrent punch-ins created duplicate attendance records. | Added `ensure_indexes()` in FastAPI lifespan creating unique index on `attendance_logs(emp_code, date)` and required compound indexes idempotently. |
+| 7 | `POST /attendance/punch-in` | Used check-then-act (`find_one` followed by `insert_one`), causing a race condition under concurrent requests. | Concurrent punch-in requests for the same employee arriving at the same millisecond both passed validation and created duplicate records. | Relied on MongoDB unique compound index on `(emp_code, date)` and caught `pymongo.errors.DuplicateKeyError` to return HTTP 409 Conflict atomically. |
+| 8 | `POST /attendance/punch-out` | Checked punch-out status via non-atomic `find_one` then `update_one`. | Simultaneous punch-out requests could both succeed or overwrite each other. | Implemented atomic `find_one_and_update({"emp_code": emp_code, "date": date, "punch_out": None}, ...)` returning 409 if already punched out. |
+| 9 | `GET /analytics/departments/summary` | Aggregated directly from `attendance_logs`. | Employees with zero attendance logs in the month were completely excluded from department headcount and metrics. | Re-anchored aggregation on `employees` filtered by department and `joined_on <= month_end`, left-joining `attendance_logs` for the month. |
+| 10 | `GET /analytics/leaderboard/late` | Simple database sort and limit dropped tied candidates arbitrarily at the cutoff rank. | If employees ranked 10 and 11 had identical late minutes, one was arbitrarily dropped from the top 10. | Implemented standard competition ranking (1, 2, 2, 4) using `$setWindowFields` with `$rank`, retaining all candidates with `rank <= limit`. |
+| 11 | `GET /analytics/departments/{department}/trend` | Aggregation missed calendar days with zero logs, and endpoint was missing return statement. | Days with no records were missing from the date series, breaking moving average windows, and response returned null. | Built date series from `from` to `to`, dynamically computed headcount based on `joined_on`, assigned 0.0 attendance rate on empty working days, and calculated 7-day moving averages. |
+| 12 | `PATCH /attendance/{emp_code}/{date}` | Manual corrections lacked optimistic concurrency control, field validation, and audit history. | Concurrent edits overwrote each other silently without audit logging. Status transitions to ABSENT/LEAVE did not clear punches. | Implemented optimistic locking matching `history` array length, validated presence/absence punch constraints, and appended immutable audit entries. |
+
+## Non-Defects
+
+1. **Exclusion of MongoDB `_id` in API responses**:
+   * *Investigation*: The starter code omitted or stripped `_id` from serialized output.
+   * *Conclusion*: This is **not** a defect. `DATA_MODEL.md` explicitly specifies that `_id` is internal to MongoDB and must never be accepted or returned by the HTTP API.
+2. **Storing calendar dates and shift times as plain strings (`"YYYY-MM-DD"`, `"HH:MM"`)**:
+   * *Investigation*: Considered converting `date`, `joined_on`, `shift_start`, and `shift_end` to BSON datetimes.
+   * *Conclusion*: This is **not** a defect. `DATA_MODEL.md` Section 1 explicitly states that dates and times of day are plain strings on purpose to avoid forcing arbitrary time zones onto calendar dates.
+3. **Absence of authentication/authorization headers**:
+   * *Investigation*: Evaluated adding Bearer/JWT token verification to endpoints.
+   * *Conclusion*: This is **not** a defect. The assignment specification and OpenAPI specification explicitly state there is no authentication in this assignment.
